@@ -161,7 +161,10 @@
         <Border Margin="20,30,20,20" Height="35">
             <DockPanel>
                 <Button Name="btnClose" Width="60" Command="{Binding Close}">Close</Button>
-                <Button Name="btnStartPause" Width="60" HorizontalAlignment="Right" Command="{Binding StartPuase}">Start</Button>
+                <Button Name="btnStartPause" Width="60" DockPanel.Dock="Right" Command="{Binding StartPuase}">Start</Button>
+                <Border Margin="180,0" BorderThickness="1" BorderBrush="Black">
+                    <Label FontWeight="Bold" FontSize="15" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Content="{Binding PrcessText}" Name="lblProcessText"></Label>
+                </Border>
             </DockPanel>
         </Border>
     </StackPanel>

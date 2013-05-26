@@ -3,13 +3,11 @@ open System.Drawing
 open System.Collections.ObjectModel
 open System.ComponentModel
 open System.Net
-open System.Net.Security
-open System.Net.Sockets
 open System.Windows
 open System.Windows.Controls
 open System.Windows.Markup
-open System.Windows.Media
 open System.Windows.Input
+open System.Windows.Threading
 open System.IO
 open System.Text
 open System.Threading
@@ -54,7 +52,8 @@ let getContent url post =
     use res = (getRequest url post).GetResponse() :?> HttpWebResponse
     res.StatusCode,res.ContentLength
 
-let wget url post path (startpos:int64) endpos (pb:float -> unit) (isPause:unit -> bool) (op:int64) =
+let wget id url post path (startpos:int64) endpos (pb:float -> unit) (isPause:unit -> bool) (op:int64) setSize =
+    let f = setSize id
     let req = getRequest url post
     req.AddRange(startpos,endpos)
     use res = req.GetResponse()
@@ -67,19 +66,22 @@ let wget url post path (startpos:int64) endpos (pb:float -> unit) (isPause:unit 
             yield ress.ReadByte() }
     |> Seq.takeWhile ((<=)0)
     |> Seq.scan (fun (c,_) d ->
+        f c
         if c % op = 0L then
             pb <| (float c / float op)
         (c+1L,d)) (0L,0)
     |> Seq.skip 1
     |> Seq.map snd
     |> Seq.iter write
-    path
+    id,path
 
 /// 分割ダウンロードの開始
-let startDownload url post (pbs:(float -> unit) list) (isPause:unit -> bool) (reset:unit -> unit) (path:string) (threadcount:int) =
+let startDownload url post (pbs:(float -> unit) list) (isPause:unit -> bool) (reset:unit -> unit) (path:string) (threadcount:int) setSize setContentSize =
     try
         let status,len = getContent url post;
         if status <> HttpStatusCode.PartialContent then
+            setContentSize len
+
             let root = Path.GetDirectoryName path
             let filename = (new Uri(url)).Segments |> Seq.fold (fun acm s -> s) ""
             let name,ex = let a = filename.Split('.') in a.[0],a.[1]
@@ -98,7 +100,7 @@ let startDownload url post (pbs:(float -> unit) list) (isPause:unit -> bool) (re
                 let nextpos = positions.[id + 1]
                 let size = nextpos - pos
                 let op = size / 100L
-                async { let path = wget url post temps.[id] pos nextpos pbs.[id] isPause op in return id,path })
+                async { return wget id url post temps.[id] pos nextpos pbs.[id] isPause op setSize })
             |> Async.Parallel
             |> Async.RunSynchronously
             |> combineFile path
@@ -106,8 +108,8 @@ let startDownload url post (pbs:(float -> unit) list) (isPause:unit -> bool) (re
     | ex -> MessageBox.Show (ex.Message, "例外エラー") |> ignore
     reset()
 
-let asyncStartDownload token url post (pbs:(float -> unit) list) (isPause:unit -> bool) (reset:unit -> unit) (path:string) (threadcount:int) =
-    let a = async { startDownload url post pbs isPause reset path threadcount }
+let asyncStartDownload token url post (pbs:(float -> unit) list) (isPause:unit -> bool) (reset:unit -> unit) (path:string) (threadcount:int) setSize setContentSize =
+    let a = async { startDownload url post pbs isPause reset path threadcount setSize setContentSize }
     try
         Async.Start (a, token)
     with
@@ -146,6 +148,8 @@ type ViewModelBase() =
 type FsHttpDownloaderWPF() as x =
     inherit ViewModelBase()
 
+    let _timer = new DispatcherTimer()
+
     let obj = new Object()
     let token = Async.DefaultCancellationToken
 
@@ -154,10 +158,17 @@ type FsHttpDownloaderWPF() as x =
     let mutable _url = "http://localhost/test/winxp.rar"
     let mutable _path = @"D:\winxp.rar"
     let mutable _threadcount = 1
+    let mutable _contentsize = 0L
+    let mutable _sizes = Array.init 9 (fun _ -> 0L)
+
+    let _changeContentSize = fun v -> lock obj (fun _ -> _contentsize <- v)
+    let _changeSizeFunction i =
+        lock obj (fun _ -> (fun v -> _sizes.[i] <- v))
 
     let _wpf = Application.LoadComponent(new Uri("FsHttpDownloaderWPF.xaml", System.UriKind.Relative)) :?> Window
     let _progressBarBorder = _wpf.FindName("progressBarBorder") :?> Border
     let _progressBarPanel = _wpf.FindName("progressBarPanel") :?> StackPanel
+    let _lblProcessText = _wpf.FindName("lblProcessText") :?> Label
     let _progressBars =
         seq { 1..9 }
         |> Seq.map (sprintf "progressBar%d")
@@ -184,8 +195,20 @@ type FsHttpDownloaderWPF() as x =
         _btnStartPause.Dispatcher.Invoke(new Action(fun _ -> _btnStartPause.Content <- "Start"), null) |> ignore
 
     do
+        _timer.Interval <- new TimeSpan(250L);
+        _timer.Tick.Add(fun _ ->
+            let c = float _contentsize
+            if 0L < _contentsize then
+                let n = float <| lock obj (fun () -> _sizes |> Array.sum)
+                let a = n / c * 100.0
+                let b = sprintf "%f%%" a
+                _lblProcessText.Dispatcher.Invoke(new Action(fun _ -> _lblProcessText.Content <- b), null)
+                |> ignore)
+
         _wpf.DataContext <- x
-        _wpf.Loaded.Add(fun _ -> changeThreadCount 1)
+        _wpf.Loaded.Add(fun _ ->
+            changeThreadCount 1
+            _timer.Start())
 
     member x.WPF = _wpf
     member x.ProgressBarPanel = _progressBarPanel
@@ -254,7 +277,9 @@ type FsHttpDownloaderWPF() as x =
                         <| isPause
                         <| initFlag
                         <| _path
-                        <| _threadcount)
+                        <| _threadcount
+                        <| _changeSizeFunction
+                        <| _changeContentSize)
 
 [<STAThread>]
 [<EntryPoint>]
